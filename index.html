@@ -1,0 +1,501 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Nebula</title>
+<style>
+:root{--paper:#f4f2ec;--ink:#1b1b1d;--mute:#77746c;--line:#d9d5c9;color-scheme:light}
+*{box-sizing:border-box}
+html,body{height:100%;margin:0}
+body{background:var(--paper);color:var(--ink);font:12px/1.4 "Helvetica Neue",Helvetica,Arial,sans-serif;overflow:hidden}
+canvas{position:fixed;inset:0;width:100%;height:100%;display:block}
+.panel{position:fixed;top:14px;right:14px;width:210px;display:grid;gap:9px;padding:12px;background:rgba(244,242,236,.92);border:1px solid var(--line);border-radius:4px;font-size:11px;max-height:calc(100vh - 28px);overflow:auto}
+.panel.closed>:not(.hd){display:none}
+.hd{display:flex;justify-content:space-between;align-items:center;letter-spacing:.14em;text-transform:uppercase;color:var(--mute);cursor:pointer;user-select:none}
+.ctl{display:grid;gap:3px}
+.ctl label{display:flex;justify-content:space-between;color:var(--mute)}
+.ctl output{color:var(--ink);font-variant-numeric:tabular-nums}
+input[type=range]{width:100%;accent-color:var(--ink);margin:0}
+select,input[type=text],button{font:inherit;color:var(--ink);background:transparent;border:1px solid var(--ink);border-radius:2px;padding:5px 8px;width:100%}
+button{cursor:pointer}button:hover,button.p{background:var(--ink);color:var(--paper)}
+.row{display:flex;gap:6px}.row>*{flex:1;min-width:0}
+.start{position:fixed;inset:0;display:grid;place-items:center;background:rgba(244,242,236,.82);z-index:5}
+.start button{width:auto;padding:16px 34px;font-size:15px;letter-spacing:.12em;text-transform:uppercase;background:var(--ink);color:var(--paper);border-radius:999px}
+.start small{display:block;margin-top:12px;color:var(--mute);text-align:center}
+.snd{position:fixed;top:14px;left:14px;width:auto;padding:7px 14px;border-radius:999px;z-index:3}
+.snd.on{background:var(--ink);color:var(--paper)}
+.ends{display:flex;justify-content:space-between;color:var(--mute);font-size:10px;letter-spacing:.08em;text-transform:uppercase}
+.syn{border-top:1px solid var(--line);padding-top:8px}
+.syn summary{cursor:pointer;color:var(--mute);letter-spacing:.14em;text-transform:uppercase;user-select:none}
+.syn[open] summary{margin-bottom:9px;color:var(--ink)}
+#sy{display:grid;gap:9px}
+.chk{display:flex;gap:6px;align-items:center}
+:focus-visible{outline:2px solid #2a6df4;outline-offset:2px}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<div class="start" id="start"><div><button id="startBtn">&#9654; Start &amp; play sound</button><small>Browsers need one click before audio can start.</small></div></div>
+<button class="snd on" id="snd">&#9835; Sound: on</button>
+<div class="panel" id="panel">
+  <div class="hd" id="hd"><span>Nebula</span><span id="tog">–</span></div>
+  <div class="row"><button class="p" id="rand">Randomize</button><button id="replay">Replay</button></div>
+  <div class="row"><button id="png">Save PNG</button><button id="newseed">New seed</button></div>
+  <div class="ctl"><label for="seed">Seed</label><input type="text" id="seed"></div>
+  <div class="ctl"><label for="prog">Progression</label><select id="prog"></select></div>
+  <div id="sl" style="display:contents"></div>
+  <details class="syn" id="syn"><summary>Synth</summary><div id="sy">
+    <div class="ctl"><label for="preset">Preset</label><select id="preset"></select></div>
+  </div></details>
+  <div class="ctl"><label for="exp">PNG size</label>
+    <select id="exp"><option value="1">Screen</option><option value="2" selected>2× screen</option><option value="3">3× screen</option><option value="4k">3840 × 2160</option></select></div>
+</div>
+
+<script>
+(() => {
+const $ = id => document.getElementById(id);
+const cv = $('c'), cx = cv.getContext('2d');
+
+// ---------- music ----------
+const NOTE = ['C','Db','D','Eb','E','F','Gb','G','Ab','A','Bb','B'];
+// chord tones as semitones above the root; guide tones (3rd + 7th/6th) always get voiced
+const TYPES = {
+  maj7: {iv:[0,4,7,11,2,9],  guide:[4,11], name:'maj7'},
+  m7:   {iv:[0,3,7,10,2,5],  guide:[3,10], name:'m7'},
+  '7':  {iv:[0,4,7,10,2,9],  guide:[4,10], name:'7'},
+  m7b5: {iv:[0,3,6,10,5],    guide:[3,10], name:'m7b5'},
+  '7alt':{iv:[0,4,8,10,1,3], guide:[4,10], name:'7alt'},
+  '7b9':{iv:[0,4,7,10,1,9],  guide:[4,10], name:'7b9'},
+  m6:   {iv:[0,3,7,9,2],     guide:[3,9],  name:'m6'},
+};
+// [semitones above the key's tonic, chord type]
+const PROGS = [
+  {name:'ii–V–I',                  mode:'major', ch:[[2,'m7'],[7,'7'],[0,'maj7']]},
+  {name:'I–vi–ii–V–I',             mode:'major', ch:[[0,'maj7'],[9,'m7'],[2,'m7'],[7,'7'],[0,'maj7']]},
+  {name:'iii–VI–ii–V–I',           mode:'major', ch:[[4,'m7'],[9,'7b9'],[2,'m7'],[7,'7'],[0,'maj7']]},
+  {name:'ii–bII7–I (tritone sub)', mode:'major', ch:[[2,'m7'],[1,'7'],[0,'maj7']]},
+  {name:'I–iv–bVII7–I (backdoor)', mode:'major', ch:[[0,'maj7'],[5,'m7'],[10,'7'],[0,'maj7']]},
+  {name:'ii–V–i (minor)',          mode:'minor', ch:[[2,'m7b5'],[7,'7alt'],[0,'m6']]},
+  {name:'i–iv–iiø–V–i',            mode:'minor', ch:[[0,'m7'],[5,'m7'],[2,'m7b5'],[7,'7b9'],[0,'m6']]},
+  {name:'Rhythm changes',          mode:'major', ch:[[0,'maj7'],[9,'7b9'],[2,'m7'],[7,'7'],[0,'maj7'],[0,'7'],[5,'maj7'],[5,'m6'],[4,'m7'],[9,'7alt'],[2,'m7'],[7,'7'],[0,'maj7']]},
+  {name:'Jazz blues',              mode:'major', ch:[[0,'7'],[5,'7'],[0,'7'],[2,'m7'],[7,'7'],[0,'7'],[9,'7alt'],[2,'m7'],[7,'7'],[0,'maj7']]},
+];
+$('prog').add(new Option('Auto (from seed)', 'auto'));
+PROGS.forEach((p,i)=>$('prog').add(new Option(p.name, i)));
+const freq = n => 440 * Math.pow(2, (n - 69) / 12);
+
+// ---------- seed ----------
+function hashSeed(s){let h=1779033703^s.length;for(let i=0;i<s.length;i++){h=Math.imul(h^s.charCodeAt(i),3432918353);h=h<<13|h>>>19;}return h>>>0;}
+function mulberry(a){return()=>{a|=0;a=a+0x6D2B79F5|0;let t=Math.imul(a^a>>>15,1|a);t=t+Math.imul(t^t>>>7,61|t)^t;return((t^t>>>14)>>>0)/4294967296;};}
+const newSeed = () => Math.random().toString(36).slice(2,8);
+
+// ---------- sliders ----------
+const SL = [
+  ['voices','Voices',3,10,1,6],
+  ['labels','Labelled voices',0,10,1,3],
+  ['weight','Line weight',0.5,4,0.1,1.2],
+  ['chordLen','Chord length (s)',1.5,6,0.1,3],
+  ['form','Opening glide (s)',1,8,0.5,3],
+  ['speed','Scroll speed',30,320,5,120],
+  ['change','Notes that change',0,1,0.05,0.6],
+];
+const P = {};
+let started = false;
+for (const [k,label,min,max,step,def] of SL) {
+  P[k]=def;
+  const d=document.createElement('div');d.className='ctl';
+  d.innerHTML=`<label for="s_${k}">${label}<output></output></label><input type="range" id="s_${k}" min="${min}" max="${max}" step="${step}" value="${def}">`;
+  $('sl').appendChild(d);
+  const i=d.querySelector('input'),o=d.querySelector('output');
+  const u=()=>{P[k]=+i.value;o.textContent=k==='change'?Math.round(i.value*100)+'%':i.value;};
+  i.addEventListener('input',()=>{u();build();});
+  i.addEventListener('change',()=>{if(started&&['voices','chordLen','form','change'].includes(k))replay();});
+  if(k==='change'){d.insertAdjacentHTML('beforeend','<div class="ends"><span>Few</span><span>Many</span></div>');o.dataset.pct=1;}
+  u();
+}
+const setSlider=(k,v)=>{const i=$('s_'+k);i.value=v;i.dispatchEvent(new Event('input'));};
+
+// ---------- synth controls ----------
+const cutHz=()=>200*Math.pow(80,P.cutoff);
+const kfmt=v=>v>=1000?(v/1000).toFixed(1)+'k':Math.round(v)+'';
+// key,label,min,max,step,default,live?(false = rebuild/replay on release)
+const SYN=[
+  ['harm','Overtone (octave up)',0,1,0.05,0.25,true],
+  ['detune','Unison detune (cents)',0,40,1,0,true],
+  ['cutoff','Filter cutoff',0,1,0.01,1,true],
+  ['reso','Filter resonance',0.1,12,0.1,0.7,true],
+  ['vibRate','Vibrato rate (Hz)',0.5,10,0.1,5,true],
+  ['vibDepth','Vibrato depth (cents)',0,60,1,0,true],
+  ['reverb','Reverb',0,1,0.05,0.25,true],
+  ['bass','Bass level',0,2,0.05,1,true],
+  ['vol','Volume',0,1,0.05,0.8,true],
+  ['attack','Attack (s)',0.05,4,0.05,0.3,false],
+  ['release','Release / fade (s)',0.2,5,0.1,1.2,false],
+  ['glideLen','Glide length (s)',0.1,3,0.1,1,false],
+];
+const SELS={wave:['sine','triangle','sawtooth','square'],glideShape:['smooth','linear','quick']};
+const SELLABEL={wave:'Waveform',glideShape:'Glide shape'};
+const SYN_DEF={wave:'sine',glideShape:'smooth'};
+const PRESETS={
+  'Clean sine':{wave:'sine',harm:.25,detune:0,cutoff:1,reso:.7,vibDepth:0,reverb:.25,bass:1,vol:.8,attack:.3,release:1.2,glideLen:1,glideShape:'smooth'},
+  'Soft pad':{wave:'triangle',harm:.3,detune:8,cutoff:.72,reso:.7,vibDepth:0,reverb:.55,bass:1,vol:.8,attack:1.2,release:2.5,glideLen:1.5,glideShape:'smooth'},
+  'Organ':{wave:'square',harm:.8,detune:0,cutoff:.7,reso:.5,vibRate:6,vibDepth:8,reverb:.15,bass:1.2,vol:.8,attack:.08,release:.3,glideLen:.4,glideShape:'quick'},
+  'Glass':{wave:'sine',harm:.9,detune:3,cutoff:1,reso:.7,vibRate:5.5,vibDepth:6,reverb:.7,bass:.5,vol:.8,attack:.1,release:3,glideLen:1,glideShape:'smooth'},
+  'Bass-heavy':{wave:'sawtooth',harm:.2,detune:12,cutoff:.45,reso:3,vibDepth:0,reverb:.2,bass:1.8,vol:.8,attack:.1,release:1,glideLen:.8,glideShape:'smooth'},
+};
+$('preset').add(new Option('Custom','custom'));
+for(const k in PRESETS)$('preset').add(new Option(k,k));
+Object.assign(P,SYN_DEF);
+const synBox=$('sy');
+const touch=()=>{$('preset').value='custom';};
+for(const k in SELS){
+  const d=document.createElement('div');d.className='ctl';
+  d.innerHTML=`<label for="s_${k}">${SELLABEL[k]}</label><select id="s_${k}">${SELS[k].map(o=>`<option value="${o}">${o}</option>`).join('')}</select>`;
+  synBox.appendChild(d);
+  d.querySelector('select').addEventListener('change',e=>{
+    P[k]=e.target.value;touch();
+    if(k==='glideShape'){build();if(started)replay();}else applySynth();
+    writeHash();
+  });
+}
+for(const [k,label,min,max,step,def,live] of SYN){
+  P[k]=def;
+  const d=document.createElement('div');d.className='ctl';
+  d.innerHTML=`<label for="s_${k}">${label}<output></output></label><input type="range" id="s_${k}" min="${min}" max="${max}" step="${step}" value="${def}">`;
+  synBox.appendChild(d);
+  const i=d.querySelector('input'),o=d.querySelector('output');
+  const u=()=>{P[k]=+i.value;o.textContent=k==='cutoff'?kfmt(cutHz())+' Hz':i.value;};
+  i.addEventListener('input',()=>{u();touch();if(k==='glideLen')build();applySynth();writeHash();});
+  i.addEventListener('change',()=>{if(started&&['attack','release','glideLen'].includes(k))replay();});
+  u();
+}
+function setSyn(k,v){
+  const el=$('s_'+k);if(!el)return;
+  el.value=v;el.dispatchEvent(new Event(el.tagName==='SELECT'?'change':'input'));
+}
+function applyPreset(name){
+  const pr=PRESETS[name];if(!pr)return;
+  const full=Object.assign({vibRate:5},pr);
+  for(const k in full)setSyn(k,full[k]);
+  build();$('preset').value=name;applySynth();writeHash();if(started)replay();
+}
+$('preset').addEventListener('change',e=>{if(e.target.value!=='custom')applyPreset(e.target.value);});
+function writeHash(){
+  try{const q=new URLSearchParams({seed:$('seed').value||'x',prog:$('prog').value});for(const k in P)q.set(k,P[k]);history.replaceState(null,'','#'+q);}catch(e){}
+}
+
+// ---------- scene: key, progression, voice leading ----------
+const ease = t => t<.5 ? 4*t*t*t : 1-Math.pow(-2*t+2,3)/2;
+const GL={smooth:ease,linear:t=>t,quick:t=>1-Math.pow(1-t,3)};
+let S = null;
+function build() {
+  const seedStr = $('seed').value || 'x', seedNum = hashSeed(seedStr), r = mulberry(seedNum);
+  const key = Math.floor(r()*12);
+  const sel = $('prog').value, auto = Math.floor(r()*PROGS.length);
+  const prog = PROGS[sel==='auto' ? auto : +sel];
+  const chords = prog.ch.map(([off,type])=>{
+    const root=(key+off)%12;return {root,type,name:NOTE[root]+TYPES[type].name};
+  });
+  const K = P.voices, n = chords.length;
+  const m = Array.from({length:K},()=>[]);
+  // bass: chord root, nearest to the previous bass note
+  let pb = 38;
+  for (const c of chords) {
+    let best=null;
+    for (let x=33;x<=50;x++) if (x%12===c.root && (best===null||Math.abs(x-pb)<Math.abs(best-pb))) best=x;
+    m[0].push(best);pb=best;
+  }
+  // upper voices. Common tones may hold; how many of them are made to move is set by the Few–Many
+  // slider. Voices whose note doesn't belong to the new chord must always move, and the 3rd/7th
+  // are always covered. Everything that moves takes the smallest step.
+  const r2=mulberry(seedNum^0x9e3779b9);
+  let prev = Array.from({length:K-1},(_,j)=>52+Math.round(j*24/Math.max(1,K-2)));
+  chords.forEach((c,ci)=>{
+    const T=TYPES[c.type],pool=[];
+    const valid=x=>T.iv.some(i=>(i+c.root)%12===x%12);
+    for (let x=50;x<=80;x++) if (valid(x)) pool.push(x);
+    const asg=new Array(K-1).fill(null),used=new Set(),moving=new Set();
+    if(ci===0){prev.forEach((_,j)=>moving.add(j));}
+    else{
+      const hold=[];
+      prev.forEach((x,j)=>{if(valid(x))hold.push(j);else moving.add(j);});
+      // choose, in seeded order, which of the voices that could hold are made to move anyway
+      const order=hold.slice();for(let i=order.length-1;i>0;i--){const k=Math.floor(r2()*(i+1));[order[i],order[k]]=[order[k],order[i]];}
+      const extra=Math.round(P.change*hold.length);
+      order.forEach((j,i)=>{if(i<extra)moving.add(j);});
+      prev.forEach((x,j)=>{if(!moving.has(j)){asg[j]=x;used.add(x);}});
+    }
+    const assign=(filter,js)=>{
+      let bj=-1,bn=null,bc=1e9;
+      for (const j of js) if(asg[j]===null) for (const x of pool) if(!used.has(x)&&filter(x)){
+        const cst=Math.abs(prev[j]-x)+(x===prev[j]?1000:0);   // a voice picked to move should actually move
+        if(cst<bc){bc=cst;bj=j;bn=x;}
+      }
+      if(bj>=0){asg[bj]=bn;used.add(bn);}
+      return bj>=0;
+    };
+    // make sure the guide tones are sounding; if every voice is holding, release the nearest one
+    for (const g of T.guide) {
+      const gp=(g+c.root)%12;
+      if (asg.some(x=>x!==null&&x%12===gp)) continue;
+      if (![...moving].some(j=>asg[j]===null)) {
+        let bj=-1,bc=1e9;
+        asg.forEach((x,j)=>{if(x===null)return;for(const y of pool)if(y%12===gp&&!used.has(y)&&Math.abs(x-y)<bc){bc=Math.abs(x-y);bj=j;}});
+        if(bj>=0){used.delete(asg[bj]);asg[bj]=null;moving.add(bj);}
+      }
+      assign(x=>x%12===gp,[...moving]);
+    }
+    const js=[...moving];
+    while (js.some(j=>asg[j]===null) && assign(()=>true,js)) {}
+    asg.forEach((v,j)=>{if(v===null)asg[j]=prev[j];});   // safety net
+    asg.forEach((v,j)=>m[j+1].push(v));
+    prev=asg;
+  });
+  const all=m.flat(),lo=Math.min(...all),hi=Math.max(...all),f0=(lo+hi)/2;
+  const voices=m.map(ms=>({m:ms,fk:0.7+0.3*r()}));
+  // labelled voices spread through the register (bass, middle, top)
+  const L=Math.min(P.labels,K),lab=new Set();
+  for(let i=0;i<L;i++)lab.add(L===1?0:Math.round(i*(K-1)/(L-1)));
+  voices.forEach((v,i)=>v.label=lab.has(i));
+  const fd=P.form,cd=P.chordLen,g=Math.min(P.glideLen,cd);
+  S={voices,chords,prog,key,seedNum,lo,hi,f0,fd,cd,g,n,end:fd+n*cd,shape:GL[P.glideShape]||ease};
+  S.progText=chords.map(c=>c.name).join(' → ');
+  S.keyText=NOTE[key]+' '+prog.mode;
+  writeHash();
+}
+// midi pitch (float) of a voice at time t: opens from the shared pitch, then glides chord to chord
+function pitchAt(v,t){
+  const {fd,cd,g,n,f0}=S;
+  const ft=fd*v.fk;
+  if(t<ft)return f0+(v.m[0]-f0)*ease(t/ft);
+  if(t<fd)return v.m[0];
+  const i=Math.min(n-1,Math.floor((t-fd)/cd));
+  if(i+1<n){const tg=fd+(i+1)*cd-g;if(t>tg){const a=v.m[i],b=v.m[i+1];return a+(b-a)*S.shape((t-tg)/g);}}
+  return v.m[i];
+}
+const chordIndexAt=t=>{let k=0;for(let i=0;i<S.n;i++)if(t>=S.fd+i*S.cd-S.g)k=i;return k;};
+
+// ---------- drawing ----------
+let T = 0, playing = false, frameNo = 0;
+const FONT='"Helvetica Neue",Helvetica,Arial,sans-serif';
+
+function render(ctx, w, h, time, frame) {
+  const sc = Math.min(w, h) / 900;
+  const m = { t: h*0.12, b: h*0.17 };
+  ctx.setTransform(1,0,0,1,0,0);
+  ctx.fillStyle = '#f4f2ec'; ctx.fillRect(0,0,w,h);
+  const plotH=h-m.t-m.b,ink='#1b1b1d',cxp=w*0.5,pps=P.speed*sc;
+  // side-scroll: the playhead sits mid-page, time flows right-to-left past it
+  const X=t=>cxp+(t-time)*pps;
+  const Y=p=>m.t+plotH*(1-(p-(S.lo-3))/(S.hi-S.lo+6));
+  const cur=chordIndexAt(time);
+  const tL=time-cxp/pps,tR=time+(w-cxp)/pps;
+  ctx.lineCap='round';ctx.lineJoin='round';
+  // time grid: a faint tick every second (stronger every 4), moving with the scroll
+  ctx.lineWidth=Math.max(1,sc*.8);
+  for(let t=Math.max(0,Math.ceil(tL));t<=Math.min(S.end,tR);t++){
+    const x=X(t);ctx.strokeStyle=t%4===0?'#d2cec1':'#e6e2d7';
+    ctx.beginPath();ctx.moveTo(x,m.t);ctx.lineTo(x,h-m.b);ctx.stroke();
+  }
+  // chord boundaries and names slide past
+  ctx.font=`${11*sc}px ${FONT}`;ctx.textBaseline='alphabetic';ctx.textAlign='left';
+  S.chords.forEach((c,i)=>{
+    const x=X(S.fd+i*S.cd);if(x<-80*sc||x>w+10)return;
+    ctx.strokeStyle='#c4c0b3';ctx.lineWidth=Math.max(1,sc);
+    ctx.beginPath();ctx.moveTo(x,m.t*0.72);ctx.lineTo(x,h-m.b);ctx.stroke();
+    ctx.fillStyle=i===cur?ink:'#9a968b';
+    ctx.fillText(c.name,x+5*sc,m.t*0.62);
+  });
+  // playhead
+  ctx.strokeStyle='rgba(27,27,29,.35)';ctx.lineWidth=Math.max(1,sc);
+  ctx.setLineDash([3*sc,4*sc]);ctx.beginPath();ctx.moveTo(cxp,m.t*0.72);ctx.lineTo(cxp,h-m.b);ctx.stroke();ctx.setLineDash([]);
+  // voice traces: history solid, upcoming path faint
+  const t0=Math.max(0,tL),t1=Math.min(S.end,tR);
+  const N=Math.max(60,Math.min(1600,Math.ceil(w/2)));
+  let sumF=0,fmax=0,fmin=1e9;
+  const path=(from,to)=>{
+    ctx.beginPath();
+    const n=Math.max(2,Math.ceil(N*(to-from)/Math.max(1e-6,t1-t0)));
+    for(let i=0;i<=n;i++){const t=from+(to-from)*i/n;const x=X(t),y=Y(pitchAt(S.voices[path.v],t));i?ctx.lineTo(x,y):ctx.moveTo(x,y);}
+    ctx.stroke();
+  };
+  S.voices.forEach((v,vi)=>{
+    path.v=vi;
+    if(time>t0){ctx.strokeStyle=ink;ctx.lineWidth=P.weight*sc*1.1;path(t0,time);}
+    if(t1>time){ctx.strokeStyle='#bdb9ad';ctx.lineWidth=P.weight*sc*0.9;path(time,t1);}
+    const pm=pitchAt(v,time),f=freq(pm),hy=Y(pm);
+    sumF+=f;fmax=Math.max(fmax,f);fmin=Math.min(fmin,f);
+    ctx.fillStyle=ink;ctx.beginPath();ctx.arc(cxp,hy,4.6*sc,0,Math.PI*2);ctx.fill();
+    if(v.label){
+      const txt=f.toFixed(2)+' Hz';
+      ctx.font=`${11.5*sc}px ${FONT}`;ctx.textBaseline='middle';
+      const tw=ctx.measureText(txt).width;
+      ctx.fillStyle='rgba(244,242,236,.88)';ctx.fillRect(cxp+8*sc,hy-8*sc,tw+8*sc,16*sc);
+      ctx.fillStyle=ink;ctx.fillText(txt,cxp+12*sc,hy-1*sc);
+    }
+  });
+  if(X(0)>0&&X(0)<w){ctx.fillStyle=ink;ctx.beginPath();ctx.arc(X(0),Y(S.f0),3*sc,0,Math.PI*2);ctx.fill();}
+
+  // readouts
+  const fs=11.5*sc,pad=Math.max(18*sc,w*0.025),lh=fs*1.55;
+  ctx.font=`${fs}px ${FONT}`;ctx.textBaseline='alphabetic';ctx.fillStyle='#4a4842';
+  const mm=Math.floor(time/60),ss=(time%60).toFixed(2).padStart(5,'0');
+  const left=['f(n) = 440·2^((n−69)/12)',`voices ${S.voices.length}`,`t ${String(mm).padStart(2,'0')}:${ss}`,`frame ${String(frame).padStart(5,'0')}`];
+  const right=[`key ${S.keyText} · ${S.prog.name}`,`chord ${S.chords[cur].name}`,`Σf ${sumF.toFixed(1)} Hz`,`f↑/f↓ ${(fmax/fmin).toFixed(4)}`,`motion ${Math.round(P.change*100)}%`,`seed 0x${S.seedNum.toString(16).toUpperCase().padStart(8,'0')}`];
+  left.forEach((t,i)=>{ctx.textAlign='left';ctx.fillText(t,pad,h-pad-(left.length-1-i)*lh);});
+  right.forEach((t,i)=>{ctx.textAlign='right';ctx.fillText(t,w-pad,h-pad-(right.length-1-i)*lh);});
+  // progression line, shrunk to fit the space between the corner blocks
+  let pf=fs;ctx.font=`${pf}px ${FONT}`;
+  const room=w*0.42,tw=ctx.measureText(S.progText).width;
+  if(tw>room){pf=pf*room/tw;ctx.font=`${pf}px ${FONT}`;}
+  ctx.textAlign='center';ctx.fillStyle=ink;ctx.fillText(S.progText,w/2,h-pad);
+  ctx.textAlign='left';
+}
+
+// ---------- audio ----------
+let ac=null,soundOn=true,out=null,active=null,verbIn=null,wet=null;
+const LV={sine:1,triangle:1,sawtooth:.5,square:.45};   // rough loudness match between waveforms
+function ensureAudio(){
+  if(!ac){
+    ac=new (window.AudioContext||window.webkitAudioContext)();
+    out=ac.createGain();out.gain.value=P.vol;
+    // safety chain: limiter, then a soft clipper that can never exceed 0.98
+    const lim=ac.createDynamicsCompressor();lim.threshold.value=-8;lim.knee.value=0;lim.ratio.value=20;lim.attack.value=.002;lim.release.value=.1;
+    const sh=ac.createWaveShaper(),curve=new Float32Array(4097);
+    for(let i=0;i<curve.length;i++){const x=i/2048-1,a=Math.abs(x);curve[i]=Math.sign(x)*(a<.7?a:.7+.28*Math.tanh((a-.7)/.28));}
+    sh.curve=curve;
+    const an=ac.createAnalyser();an.fftSize=1024;window.__nebulaAnalyser=an;
+    out.connect(lim);lim.connect(sh);sh.connect(an);an.connect(ac.destination);
+    // reverb send
+    verbIn=ac.createGain();const verb=ac.createConvolver();wet=ac.createGain();
+    const len=ac.sampleRate*3,buf=ac.createBuffer(2,len,ac.sampleRate);
+    for(let c=0;c<2;c++){const d=buf.getChannelData(c);for(let i=0;i<len;i++)d[i]=(Math.random()*2-1)*Math.pow(1-i/len,2.5);}
+    verb.buffer=buf;wet.gain.value=P.reverb*.8;
+    verbIn.connect(verb);verb.connect(wet);wet.connect(out);
+  }
+  return ac.resume();
+}
+function stopSound(){
+  if(!active)return;
+  const {master,oscs}=active,n=ac.currentTime;
+  master.gain.cancelScheduledValues(n);master.gain.setValueAtTime(master.gain.value,n);master.gain.linearRampToValueAtTime(0,n+.12);
+  oscs.forEach(o=>{try{o.stop(n+.2);}catch(e){}});active=null;
+}
+const setP=(param,v)=>param.setTargetAtTime(v,ac.currentTime,.03);
+// push the current synth settings into the sounding nodes (live)
+function applySynth(){
+  if(!ac)return;
+  setP(out.gain,P.vol);setP(wet.gain,P.reverb*.8);
+  if(!active)return;
+  const A=active;
+  A.mains.forEach(vo=>vo.forEach((o,i)=>{o.type=P.wave;o.detune.value=[0,P.detune,-P.detune][i];}));
+  A.waveGains.forEach(g=>setP(g.gain,LV[P.wave]));
+  A.over.forEach(g=>setP(g.gain,P.harm*.6));
+  A.trims.forEach((g,i)=>setP(g.gain,i===0?P.bass:1));
+  setP(A.filter.frequency,cutHz());setP(A.filter.Q,P.reso);setP(A.fg.gain,1/(1+Math.max(0,P.reso-1)*.12));
+  setP(A.lfo.frequency,P.vibRate);setP(A.lfoG.gain,P.vibDepth);
+}
+// One sustained tone per voice (plus detuned partners and an octave overtone), following exactly the
+// same pitch path as its drawn line
+function playChord(){
+  if(!ac)return;
+  stopSound();
+  if(!soundOn)return;
+  const now=ac.currentTime+0.05,total=S.end,oscs=[],att=Math.min(P.attack,total/3),rel=Math.min(P.release,total/2);
+  const comp=ac.createDynamicsCompressor();comp.threshold.value=-18;comp.ratio.value=6;
+  const master=ac.createGain();
+  master.gain.setValueAtTime(0,now);master.gain.linearRampToValueAtTime(.7,now+.4);
+  master.gain.setValueAtTime(.7,now+total-rel);master.gain.linearRampToValueAtTime(0,now+total);
+  const filter=ac.createBiquadFilter();filter.type='lowpass';filter.frequency.value=cutHz();filter.Q.value=P.reso;
+  const fg=ac.createGain();fg.gain.value=1/(1+Math.max(0,P.reso-1)*.12);
+  master.connect(filter);filter.connect(fg);fg.connect(comp);comp.connect(out);comp.connect(verbIn);
+  const lfo=ac.createOscillator(),lfoG=ac.createGain();lfo.frequency.value=P.vibRate;lfoG.gain.value=P.vibDepth;lfo.connect(lfoG);lfo.start(now);lfo.stop(now+total+.1);oscs.push(lfo);
+  const per=.7/S.voices.length,steps=Math.ceil(total*50)+1;
+  const mains=[],over=[],trims=[],waveGains=[];
+  S.voices.forEach((v,vi)=>{
+    const env=ac.createGain();env.gain.setValueAtTime(0,now);env.gain.linearRampToValueAtTime(per,now+att);
+    env.gain.setValueAtTime(per,now+total-rel);env.gain.linearRampToValueAtTime(0,now+total);
+    const trim=ac.createGain();trim.gain.value=vi===0?P.bass:1;
+    const wg=ac.createGain();wg.gain.value=LV[P.wave];
+    const c1=new Float32Array(steps),c2=new Float32Array(steps);
+    for(let i=0;i<steps;i++){const f=freq(pitchAt(v,Math.min(total,i/50)));c1[i]=f;c2[i]=f*2;}
+    const mix=ac.createGain();mix.gain.value=1;const vo=[];
+    [[.5,0],[.25,P.detune],[.25,-P.detune]].forEach(([lvl,cents])=>{
+      const o=ac.createOscillator(),g=ac.createGain();o.type=P.wave;o.detune.value=cents;g.gain.value=lvl;
+      o.frequency.setValueCurveAtTime(c1,now,total);lfoG.connect(o.detune);
+      o.connect(g);g.connect(mix);o.start(now);o.stop(now+total+.1);oscs.push(o);vo.push(o);
+    });
+    const o2=ac.createOscillator(),g2=ac.createGain();o2.type='triangle';g2.gain.value=P.harm*.6;
+    o2.frequency.setValueCurveAtTime(c2,now,total);lfoG.connect(o2.detune);
+    o2.connect(g2);g2.connect(mix);o2.start(now);o2.stop(now+total+.1);oscs.push(o2);
+    mix.connect(wg);wg.connect(env);env.connect(trim);trim.connect(master);
+    mains.push(vo);over.push(g2);trims.push(trim);waveGains.push(wg);
+  });
+  active={master,oscs,mains,over,trims,waveGains,filter,fg,lfo,lfoG};
+}
+
+// ---------- loop ----------
+function fit(){
+  const d=Math.min(devicePixelRatio||1,2);
+  cv.width=innerWidth*d;cv.height=innerHeight*d;
+}
+let last=performance.now();
+function tick(t){
+  const dt=(t-last)/1000;last=t;
+  if(playing){T+=dt;frameNo=Math.floor(T*60);if(T>=S.end){T=S.end;playing=false;}}
+  render(cx,cv.width,cv.height,Math.min(T,S.end),frameNo);
+  requestAnimationFrame(tick);
+}
+function replay(){T=0;frameNo=0;playing=true;if(started)playChord();}
+
+// ---------- UI ----------
+function randomSynth(){
+  const R=Math.random,pick=a=>a[Math.floor(R()*a.length)],f=(a,b,d=2)=>+(a+R()*(b-a)).toFixed(d);
+  const v={wave:pick(SELS.wave),glideShape:pick(SELS.glideShape),harm:f(0,.9),detune:Math.round(f(0,16,0)),cutoff:f(.45,1),reso:f(.4,4,1),
+    vibRate:f(3,7,1),vibDepth:R()<.5?0:Math.round(f(3,18,0)),reverb:f(0,.65),bass:f(.6,1.5),vol:.8,attack:f(.1,2),release:f(.6,3,1),glideLen:f(.4,1.6,1)};
+  for(const k in v)setSyn(k,v[k]);
+  $('preset').value='custom';
+}
+function randomize(){
+  $('seed').value=newSeed();$('prog').value='auto';
+  setSlider('voices',4+Math.floor(Math.random()*5));
+  setSlider('labels',2+Math.floor(Math.random()*3));
+  setSlider('weight',+(0.8+Math.random()*1.6).toFixed(1));
+  setSlider('chordLen',+(2+Math.random()*2.5).toFixed(1));
+  setSlider('change',+(0.2+Math.random()*0.8).toFixed(2));
+  setSlider('form',+(2+Math.random()*3).toFixed(1));
+  randomSynth();
+  build();replay();
+}
+$('startBtn').onclick=()=>{ensureAudio().then(()=>{started=true;$('start').remove();replay();});};
+$('snd').onclick=()=>{soundOn=!soundOn;$('snd').classList.toggle('on',soundOn);$('snd').innerHTML='&#9835; Sound: '+(soundOn?'on':'off');if(started){if(soundOn)replay();else stopSound();}};
+$('rand').onclick=randomize;
+$('replay').onclick=replay;
+$('newseed').onclick=()=>{$('seed').value=newSeed();build();replay();};
+$('seed').addEventListener('change',()=>{build();replay();});
+$('prog').addEventListener('change',()=>{build();replay();});
+$('hd').onclick=()=>{const p=$('panel');p.classList.toggle('closed');$('tog').textContent=p.classList.contains('closed')?'+':'–';};
+$('png').onclick=()=>{
+  const v=$('exp').value;let w,h;
+  if(v==='4k'){w=3840;h=2160;}else{w=Math.round(innerWidth*+v);h=Math.round(innerHeight*+v);}
+  const oc=document.createElement('canvas');oc.width=w;oc.height=h;
+  render(oc.getContext('2d'),w,h,S.end,Math.floor(S.end*60));
+  oc.toBlob(b=>{const a=document.createElement('a');a.href=URL.createObjectURL(b);
+    a.download=`nebula-${$('seed').value}-c${Math.round(P.change*100)}-${w}x${h}.png`;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),2000);},'image/png');
+};
+addEventListener('resize',fit);
+
+$('seed').value=newSeed();
+try{const q=new URLSearchParams(location.hash.slice(1));
+  if(q.get('seed'))$('seed').value=q.get('seed');
+  if(q.get('prog'))$('prog').value=q.get('prog');
+  for(const [k] of SL){if(q.has(k)){const i=$('s_'+k);i.value=q.get(k);i.dispatchEvent(new Event('input'));}}
+  for(const k of [...SYN.map(x=>x[0]),...Object.keys(SELS)])if(q.has(k))setSyn(k,q.get(k));}catch(e){}
+fit();build();
+window.__nebula={get S(){return S;},pitchAt};
+requestAnimationFrame(t=>{last=t;tick(t);});
+})();
+</script>
+</body>
+</html>
